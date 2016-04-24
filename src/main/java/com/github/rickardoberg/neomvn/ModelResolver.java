@@ -12,9 +12,12 @@ import org.apache.maven.model.building.DefaultModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelProblemCollector;
 import org.apache.maven.model.validation.ModelValidator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ModelResolver
 {
+    private final Logger logger = LoggerFactory.getLogger(ModelResolver.class);
     private RepositoryModelResolver resolver;
 
     public ModelResolver( RepositoryModelResolver resolver)
@@ -53,7 +56,7 @@ public class ModelResolver
                 }
                 catch ( Throwable e )
                 {
-                    e.printStackTrace();
+                    logger.error("while validating effective model of " + model.toString() + ": ", e);
                 }
             }
         } );

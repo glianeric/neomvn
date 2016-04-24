@@ -15,9 +15,12 @@ import org.apache.maven.model.building.ModelSource;
 import org.apache.maven.model.resolution.InvalidRepositoryException;
 import org.apache.maven.model.resolution.ModelResolver;
 import org.apache.maven.model.resolution.UnresolvableModelException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class RepositoryModelResolver implements ModelResolver
 {
+    private final static Logger logger = LoggerFactory.getLogger(RepositoryModelResolver.class);
     private File repository;
     private String mavenRepository;
 
@@ -117,7 +120,7 @@ class RepositoryModelResolver implements ModelResolver
             }
             catch ( IOException e )
             {
-                System.err.println( "Failed to download "+url );
+                logger.error("failed to download " + url, e);
             }
         }
 
