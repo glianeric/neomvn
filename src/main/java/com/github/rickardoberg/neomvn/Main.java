@@ -1,17 +1,26 @@
 package com.github.rickardoberg.neomvn;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FilenameFilter;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
+import javax.annotation.processing.FilerException;
 import javax.xml.parsers.ParserConfigurationException;
 
+import com.beust.jcommander.JCommander;
+import com.beust.jcommander.Parameter;
 import org.apache.maven.model.Dependency;
 import org.apache.maven.model.Model;
 import org.neo4j.graphdb.Direction;
@@ -33,10 +42,22 @@ import org.xml.sax.SAXException;
 
 public class Main
 {
+    static class Config {
+        @Parameter(names = {"-destPath"}, required = true, description = "database destination directory")
+        String destPath;
+        @Parameter(names = {"-repoPath"}, required = true, description = "repo path")
+        String repoPath;
+        @Parameter(names = {"-remoteRepo"}, required = false, description = "remote repo")
+        String remoteRepo = "http://repo1.maven.org/maven2";
+        @Parameter(names = {"-gits"}, required = false, description = "list of git repos/parents", variableArity = true)
+        List<String> gitRepoParents = new ArrayList<>();
+    }
+
     enum MavenNodeLabel implements Label {
         Artifact,
         Group,
-        Version
+        Version,
+        Repo
     }
 
     public final static String ATTR_ID_ARTIFACT_ID = "artifactId";
@@ -46,6 +67,10 @@ public class Main
     /** full name (e.g. com.foo:foo-lib:1.3.0) */
     public final static String ATTR_ID_ARTIFACT_VERSION_NAME = "artifactName";
     public final static String ATTR_ID_POM_FILE_PATH = "pomFile";
+    public final static String ATTR_ID_REPO_PATH = "repoPath";
+
+
+    final Config config;
 
     static class TransactionRoller {
         final GraphDatabaseService graphDatabaseService;
@@ -82,29 +107,31 @@ public class Main
         }
     }
 
-    private final GraphDatabaseService graphDatabaseService;
-    private final File repository;
+    private GraphDatabaseService graphDatabaseService;
+    private File repository;
     private final static Logger logger = LoggerFactory.getLogger(Main.class);
 
     IndexDefinition groupIndex;
     IndexDefinition artifactIndex;
     IndexDefinition versionIndex;
+    IndexDefinition repoIndex;
 
     private final DynamicRelationshipType has_artifact = DynamicRelationshipType.withName("HAS_ARTIFACT");
     private final DynamicRelationshipType has_version = DynamicRelationshipType.withName("HAS_VERSION");
     private final DynamicRelationshipType has_dependency = DynamicRelationshipType.withName("HAS_DEPENDENCY");
+    private final DynamicRelationshipType in_repo = DynamicRelationshipType.withName("IN_REPO");
 
     private ModelResolver modelResolver;
 
     private TransactionRoller txRoller;
     private List<String> failedPoms = new ArrayList<String>(  );
+    private String[] env;
 
     public static void main( String[] args ) throws ParserConfigurationException, IOException, SAXException
     {
-        if (args.length == 1)
-            new Main(new File(args[0]));
-        else
-            new Main(new File("."));
+        Config config = new Config();
+        new JCommander(config, args);
+        new Main(config).execute();
     }
 
     IndexDefinition createIndexFor (GraphDatabaseService graphDb, MavenNodeLabel nodeType, String onAttr) {
@@ -126,33 +153,46 @@ public class Main
         return indexDefinition;
     }
 
-    public Main(File repository) throws ParserConfigurationException, IOException, SAXException
+    public Main (Config config) {
+        this.config = config;
+        this.env = prepEnv();
+    }
+
+    private String[] prepEnv() {
+        Map<String, String> sysEnv = System.getenv();
+        String[] retEnv = new String[sysEnv.size()];
+        int idx = 0;
+        for (Map.Entry<String, String> entry : sysEnv.entrySet()) {
+            retEnv[idx++] = entry.getKey() + "=" + entry.getValue();
+        }
+        return retEnv;
+    }
+
+
+    public void execute() throws ParserConfigurationException, IOException, SAXException
     {
-        modelResolver = new ModelResolver( new RepositoryModelResolver(repository, "http://repo1.maven.org/maven2") );
-
-        File dbPath = new File("neomvn");
+        File dbPath = new File(config.destPath);
         dbPath.mkdir();
-
         FileUtils.deleteDirectory( dbPath );
-
         graphDatabaseService = new GraphDatabaseFactory().newEmbeddedDatabase( dbPath);
+
+        this.repository = new File(config.repoPath);
+        modelResolver = new ModelResolver( new RepositoryModelResolver(repository, config.remoteRepo) );
+
+        logger.info("using remote repo of {}", config.remoteRepo);
+        logger.info("creating db at {}", dbPath.getAbsolutePath());
+
         groupIndex = createIndexFor(graphDatabaseService, MavenNodeLabel.Group, ATTR_ID_GROUP_ID);
         artifactIndex = createIndexFor(graphDatabaseService, MavenNodeLabel.Artifact, ATTR_ID_ARTIFACT_ID);
         versionIndex = createIndexFor(graphDatabaseService, MavenNodeLabel.Version, ATTR_ID_VERSION_ID);
-
-//        try (Transaction tx = graphDatabaseService.beginTx()) {
-//            groups = graphDatabaseService.indx().forNodes("groups");
-//            artifacts = graphDatabaseService.index().forNodes("artifacts");
-//            versions = graphDatabaseService.index().forNodes("versions");
-
-//            tx.success();
-//        }
+        repoIndex = createIndexFor(graphDatabaseService, MavenNodeLabel.Repo, ATTR_ID_REPO_PATH);
 
         txRoller = new TransactionRoller(graphDatabaseService);
-        this.repository = repository;
 
         try
         {
+            visitGits (config.gitRepoParents);
+
             // Add versions
             logger.info( "Accumulating versions" );
             visitPoms(
@@ -171,27 +211,6 @@ public class Main
             // Add dependencies
             logger.info( "Accumulating dependencies" );
             visitPoms( repository, this::dependencies);
-
-            txRoller.finish();
-//            try ( Transaction tx = graphDatabaseService.beginTx() ) {
-//                try (ResourceIterator<Node> whatNodes =
-//                         graphDatabaseService.findNodes(MavenNodeLabel.Version)) {
-//                    while (whatNodes.hasNext()) {
-//                        Node node = whatNodes.next();
-//                        System.out.println("groupId : " + node.getProperty(ATTR_ID_GROUP_ID));
-//                    }
-//                }
-//            }
-//
-//            List<Node> whatNodes = new ArrayList<>();
-//            graphDatabaseService.findNodes(MavenNodeLabel.groupId).forEachRemaining(whatNodes::add);
-//            for (Node node: whatNodes) {
-//                System.out.println("Group");
-//                for (Map.Entry<String, Object> props
-//                    : (node.getAllProperties() == null ? Collections.<String, Object>emptyMap() : node.getAllProperties()).entrySet()) {
-//                    System.out.println("  " + props.getKey() + "; " + props.getValue());
-//                }
-//            }
         }
         catch (Exception e) {
             logger.error("while running: ", e);
@@ -206,6 +225,122 @@ public class Main
             System.err.println("Failed POM files");
             for (String failedPom : failedPoms) {
                 System.err.println(failedPom);
+            }
+        }
+    }
+
+    private void visitGits(List<String> gitRepoParents) {
+        for (String gitParentDir : gitRepoParents) {
+            File parentDir = new File(gitParentDir);
+            visitGitDir (parentDir);
+        }
+    }
+
+    static <T> T findElement (T[] array, Predicate<T> predicate) {
+        for (T val : array) {
+            if (predicate.test(val)) {
+                return val;
+            }
+        }
+        return null;
+    }
+
+    private void linkReposToArtifact(List<Node> repoNodes, Node artifactNode) {
+
+        for (Node repoNode : repoNodes) {
+            repoNode.createRelationshipTo(artifactNode, this.in_repo);
+            logger.info("trace: repo {} -> {}", repoNode.getProperty(ATTR_ID_REPO_PATH), artifactNode.getProperty(ATTR_ID_ARTIFACT_VERSION_NAME));
+        }
+    }
+
+    private void visitGitDir (File gitParent) {
+        if (gitParent.isDirectory()) {
+            File[] children = gitParent.listFiles();
+            File gitFile;
+            if (null != (gitFile = findElement(children, filw -> filw.getName().equals(".git")))) {
+                List<Node> repoNodes = new ArrayList<>();
+                addRemotes(gitParent, repoNodes);
+                try {
+                    visitPomXmls(gitParent, model -> {
+                        String groupId = getGroupId(model);
+                        String artifactId = model.getArtifactId();
+                        String version = getVersion(model);
+                        String name = model.getName();
+                        if (name == null)
+                            name = artifactId;
+                        Node artifactNode = artifactVersion(groupId, artifactId, version, name, pomFilePath);
+                        linkReposToArtifact (repoNodes, artifactNode);
+                    });
+
+                }
+                catch (Exception e) {
+                    logger.error("while visiting git dir " + gitParent.getAbsolutePath(), e);
+                }
+                return;
+            }
+            else {
+                for (File childFile : children) {
+                    if (childFile.isDirectory()) {
+                        visitGitDir(childFile);
+                    }
+                }
+            }
+        }
+    }
+
+    private void addRemotes(File gitHoldingDir, List<Node> repoNodes) {
+        try {
+            Process process = Runtime.getRuntime().exec("git remote -v", this.env, gitHoldingDir);
+            InputStream inputStream = process.getInputStream();
+            BufferedReader bufferedReader = new BufferedReader(
+                new InputStreamReader(inputStream));
+            String remote;
+            while (null != (remote = bufferedReader.readLine())) {
+                ensureRemoteNode(remote, repoNodes);
+            }
+        }
+        catch (Exception e) {
+            logger.error("while adding remotes in " + gitHoldingDir.getAbsolutePath(), e);
+        }
+    }
+
+    private void ensureRemoteNode (String remoteEntry, List<Node> repoNodes) {
+        String[] entryComponents = remoteEntry.split("[\t ]");
+        if (!entryComponents[0].equals("origin")) {
+            return;
+        }
+
+        String repoPath = entryComponents[1];
+
+        Node repoNode ;
+
+
+        // we could look this up with our own map, too.
+        try ( ResourceIterator<Node> priorNode = graphDatabaseService.findNodes(
+            MavenNodeLabel.Repo, ATTR_ID_REPO_PATH, repoPath ) ) {
+            if (priorNode.hasNext()) {
+                return;
+            }
+        }
+        repoNode = graphDatabaseService.createNode(MavenNodeLabel.Repo);
+        repoNode.setProperty(ATTR_ID_REPO_PATH, repoPath);
+        repoNodes.add(repoNode);
+        txRoller.commit();
+    }
+
+    private void visitPomXmls (File pomHolder, Visitor<Model> visitor) throws IOException, SAXException {
+        if (pomHolder.isDirectory()) {
+            File[] pomHolderFiles = pomHolder.listFiles();
+            File pomFile = findElement(pomHolderFiles, file ->  file.getName().equals("pom.xml"));
+            if (null == pomFile) {
+                return;
+            }
+            visitPom(pomFile, visitor);
+            txRoller.commit();
+            for (File child : pomHolderFiles) {
+                if (child.isDirectory()) {
+                    visitPomXmls(child, visitor);
+                }
             }
         }
     }
@@ -253,13 +388,13 @@ public class Main
         }
         catch ( Throwable e ) {
             LoggerFactory.getLogger( getClass() ).warn( "Could not handle: " + pomfile, e );
-//            pomfile.delete();
             failedPoms.add( pomfile.getAbsolutePath() );
         }
     }
 
 
     Map<String, Node> versionNodesByName = new HashMap<>();
+
     private Node artifactVersion(String groupId, String artifactId, String version, String name, String pomFilePath) {
         logger.info("artifactVersion {} {} {}", groupId, artifactId, version);
 
@@ -324,14 +459,6 @@ public class Main
         return groupId + ":" + artifactId + ":" + version;
     }
 
-//    private void autoIndex( Index<Node> versions, Node node )
-//    {
-//        for ( String property : node.getPropertyKeys() )
-//        {
-//            versions.add(node, property, node.getProperty( property ));
-//        }
-//    }
-
     private String getVersion( Model model )
     {
         if (model.getVersion() == null)
@@ -387,7 +514,7 @@ public class Main
                                     dependencyVersionNode, has_dependency );
 
 
-                            logger.info("trace: {} -> {}", versionNode.getProperty(ATTR_ID_ARTIFACT_VERSION_NAME), dependencyVersionNode.getProperty(ATTR_ID_ARTIFACT_VERSION_NAME));
+                            logger.trace("link: {} -> {}", versionNode.getProperty(ATTR_ID_ARTIFACT_VERSION_NAME), dependencyVersionNode.getProperty(ATTR_ID_ARTIFACT_VERSION_NAME));
 
                             dependencyRel.setProperty( "scope", withDefault(dependency.getScope(), "compile" ));
                             dependencyRel.setProperty( "optional", withDefault(dependency.isOptional(), Boolean.FALSE ));

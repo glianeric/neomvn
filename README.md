@@ -4,28 +4,33 @@ Maven repository importer for Neo4j
 This little nifty tool will allow you to import your local Maven repository information into a Neo4j graph, in particular dependencies between artifacts. You can then
 take this graph and put it into a Neo4j server, and perform Cypher queries on it. Or whatever else awesome you want to do.
 
+If you pass a list of directories in with the `-gits` argument, it will add git repositories for the repos and establish graph edges from each repo to the artifact(s)
+defined in that repo.
+
 WARNING: if you open webadmin and use the graph visualization, whatever you do don't click on "junit". Dependency explosion ahead. You have been warned.
 
 Usage
 -----
 * Clone and build using Maven
-* Run the Main class from command line with location of Maven repo as argument. Example:
+* Run the Main class from command line. The output directory will be created as necessary. Example:
 ```
-java -jar neomvn-1.0-SNAPSHOT.jar /Users/rickard/.m2/repository
+java -jar neomvn-1.0-SNAPSHOT.jar -repoPath /Users/me/.m2/repository -gits ~/dev -destPath ../maven-deps
 ```
 
-* This will import and index your local Maven repository into a Neo4j graph database created under "neomvn" directory, from where the tool was invoked.
+* This will import and index your local Maven repository into a Neo4j graph database created under "../maven-deps" directory, from where the tool was invoked.
 
 * Copy database into your own application or server, and perform awesome Cypher queries against it
 
 Model
 -----
 This is the model currently used:
+There are four known labels for nodes: Repo, Version, Artifact, Group
 * Each groupId gets a corresponding node with property "groupId"
 * Each artifactId gets a corresponding node, and a HAS_ARTIFACTID to its groupId, and properties "groupId" and "artifactId"
 * Each version gets a corresponding node, and a HAS_VERSION to its artifactId, and properties "groupId","artifactId", "version" and "name"
 * Each dependency is modeled as a HAS_DEPENDENCY from the depending version/artifactId/groupId to the depended on version/artifactId/groupId. Scope and optional as properties
-* There are three indices: groups, artifacts, and versions. Search by "groupId", "artifactId", and "version" respectively, to find starting points for queries
+* Each repo is a node with an IN_REPO edge to each version that is defined in that repo.
+* There are four indices: repos, groups, artifacts, and versions. Search by "repo", "groupId", "artifactId", and "version" respectively, to find starting points for queries
 
 Example queries
 ---------------
