@@ -179,6 +179,7 @@ public class Main
         this.repository = new File(config.repoPath);
         modelResolver = new ModelResolver( new RepositoryModelResolver(repository, config.remoteRepo) );
 
+		logger.info("using repoPath of {})", config.repoPath);
         logger.info("using remote repo of {}", config.remoteRepo);
         logger.info("creating db at {}", dbPath.getAbsolutePath());
 
@@ -347,6 +348,7 @@ public class Main
 
     private void visitPoms( File repository, Visitor<Model> visitor) throws IOException, SAXException
     {
+//		logger.info("now visiting poms at {}", repository);
         if ( repository.isDirectory() )
         {
             File[] directories = repository.listFiles( new FileFilter()
@@ -360,14 +362,16 @@ public class Main
             // depth-first
             for ( File directory : directories ) {
                 visitPoms( directory, visitor );
+				//logger.info("visitPoms directory: {}", directory);
             }
 
             File[] poms = repository.listFiles( new FilenameFilter()
             {
                 public boolean accept( File dir, String name )
                 {
+					//logger.info("POM File dir: {}", name);
                     String[] components = dir.getPath().split("/");
-                    return name.endsWith( components[components.length-1] + ".pom" );
+						return name.endsWith( ".pom" );
                 }
             } );
 
@@ -384,6 +388,7 @@ public class Main
         try {
             Model model = modelResolver.resolve( pomfile );
             pomFilePath = pomfile.getAbsolutePath();
+//			logger.info("storing POM path: {}", pomFilePath);
             visitor.accept( model );
         }
         catch ( Throwable e ) {
