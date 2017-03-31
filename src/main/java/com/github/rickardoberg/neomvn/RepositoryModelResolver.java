@@ -15,6 +15,7 @@ import org.apache.maven.model.building.ModelSource;
 import org.apache.maven.model.resolution.InvalidRepositoryException;
 import org.apache.maven.model.resolution.ModelResolver;
 import org.apache.maven.model.resolution.UnresolvableModelException;
+import org.apache.maven.model.Parent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +58,27 @@ class RepositoryModelResolver implements ModelResolver
         return new FileModelSource( pom );
     }
 
+    // Added to ensure that it builds with maven 3.3.9
+    public ModelSource resolveModel( Parent parent ) throws UnresolvableModelException
+    {
+        File pom = getLocalFile( parent.getGroupId(), parent.getArtifactId(), parent.getVersion() );
+
+        if (!pom.exists())
+        {
+            // Download it
+            try
+            {
+                download( pom );
+            }
+            catch ( IOException e )
+            {
+                throw new UnresolvableModelException( "Could not download POM", parent.getGroupId(), parent.getArtifactId(), parent.getVersion(), e );
+            }
+        }
+
+        return new FileModelSource( pom );
+    }
+    
     public File getLocalFile( String groupId, String artifactId, String versionId )
     {
         File pom = repository;
@@ -83,6 +105,12 @@ class RepositoryModelResolver implements ModelResolver
         }
         
         repositories.add(repository);
+    }
+
+    // Added so that it will build correctly with maven 3.3.9
+    public void addRepository( Repository repository, boolean replace ) throws InvalidRepositoryException
+    {
+        //
     }
 
     public ModelResolver newCopy()
